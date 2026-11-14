@@ -159,11 +159,21 @@ public enum OpenAIProvider {
             }
         }
 
+        var availableCredit: String?
         if let credits = json["credits"] as? [String: Any] {
-            if let bal = credits["balance"] as? String, !bal.isEmpty {
-                details.append(ExtraDetailItem(id: "openai-credits", label: "Credits Balance", value: bal))
+            if (credits["unlimited"] as? Bool) == true {
+                availableCredit = "Unlimited"
+            } else if let bal = credits["balance"] as? String {
+                let trimmed = bal.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    if let numericVal = Double(trimmed) {
+                        availableCredit = String(format: "$%.2f", numericVal)
+                    } else {
+                        availableCredit = trimmed
+                    }
+                }
             } else if let numBal = numericDouble(credits["balance"]) {
-                details.append(ExtraDetailItem(id: "openai-credits", label: "Credits Balance", value: String(format: "$%.2f", numBal)))
+                availableCredit = String(format: "$%.2f", numBal)
             }
         }
 
@@ -185,6 +195,7 @@ public enum OpenAIProvider {
             shortWindow: shortWindow,
             longWindow: longWindow,
             extraWindows: extraWindows,
+            availableCredit: availableCredit,
             details: details,
             fetchedAt: Date()
         )

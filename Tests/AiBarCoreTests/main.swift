@@ -40,13 +40,23 @@ private func runAnthropicTests() throws {
     }
     """.data(using: .utf8)!
 
+    let creditsJSON = """
+    {
+      "amount": 5597,
+      "currency": "EUR",
+      "balance": { "money": { "amount_minor": 5597, "currency": "EUR", "exponent": 2 } }
+    }
+    """.data(using: .utf8)!
+
     let snap = try AnthropicProvider.parseUsagePayload(
         usageData: usageJSON,
         profileData: profileJSON,
+        prepaidCreditsData: creditsJSON,
         authSource: .localOAuth
     )
 
     check(snap.state == .ready, "Anthropic state should be ready")
+    check(snap.availableCredit == "€55.97", "Anthropic prepaid credit €55.97 parsed")
     check(snap.menubarNumbers(mode: .used).map(\.value) == [36], "Anthropic menubar shows weekly [36] only")
     check(snap.menubarNumbers(mode: .remaining).map(\.value) == [64], "Anthropic remaining menubar shows weekly [64] only")
     check(snap.allWindows.count == 3, "Detail popup still retains 5h, 7d, and Sonnet windows")
@@ -73,12 +83,14 @@ private func runOpenAITests() throws {
           "limit_window_seconds": 604800,
           "reset_at": 1795100000
         }
-      }
+      },
+      "credits": { "has_credits": true, "balance": "4.2" }
     }
     """.data(using: .utf8)!
 
     let plusSnap = try OpenAIProvider.parseWhamUsage(data: plusJSON, authSource: .localOAuth)
     check(plusSnap.menubarNumbers(mode: .used).map(\.value) == [41], "OpenAI Plus menubar shows weekly [41] only")
+    check(plusSnap.availableCredit == "$4.20", "OpenAI available credit $4.20 parsed")
 
     let teamJSON = """
     {
@@ -100,7 +112,7 @@ private func runOpenAITests() throws {
 
 @MainActor
 private func runGoogleTests() throws {
-    let chunkPayload = #"[{"data":{"viewer":{"rpcs":{"getUsageInfo":{"subscriptionTier":"TIER1","pools":[{"poolType":"GXU_FIVE_HOURLY","percentageUsed":0.12,"gxu":{"windowRefreshesAt":"2026-11-14T21:00:00Z"}},{"poolType":"GXU_WEEKLY","percentageUsed":0.35,"gxu":{"windowRefreshesAt":"2026-11-20T00:00:00Z"}}]}}}},"errors":[]}]"#
+    let chunkPayload = #"[{"data":{"viewer":{"rpcs":{"getUsageInfo":{"subscriptionTier":"TIER1","pools":[{"poolType":"GXU_FIVE_HOURLY","percentageUsed":0.12,"gxu":{"windowRefreshesAt":"2026-11-14T21:00:00Z"}},{"poolType":"GXU_WEEKLY","percentageUsed":0.35,"gxu":{"windowRefreshesAt":"2026-11-20T00:00:00Z"}},{"poolType":"OVERAGE_CREDITS","overageCreditPool":{"creditsRemaining":1000}}]}}}},"errors":[]}]"#
     let escapedChunk = try String(
         data: JSONSerialization.data(withJSONObject: ["events": [["kind": "chunk", "chunk": chunkPayload]]]),
         encoding: .utf8
@@ -115,6 +127,15 @@ private func runGoogleTests() throws {
     let snap = try GoogleProvider.parseUsageHTML(fakeHTML, authSource: .webSession)
     check(snap.menubarNumbers(mode: .used).map(\.value) == [35], "Google menubar shows weekly [35] only, while popup retains 5h [12] and weekly [35]")
     check(snap.shortWindow?.usedPercentInt == 12 && snap.longWindow?.usedPercentInt == 35, "Google popup retains both 5h and weekly windows")
+    check(snap.availableCredit == "1,000 AI credits", "Google overage AI credits parsed")
+
+    let topLevelBundle = #"{"usageInfo":{"subscriptionTier":"TIER2","aiCreditsRemaining":25000,"pools":[{"poolType":"GXU_WEEKLY","percentageUsed":0.5,"gxu":{"windowRefreshesAt":"2026-11-20T00:00:00Z"}}]},"email":"a@b.c","scrapedCredits":"999 AI credits"}"#
+    let topSnap = try GoogleProvider.parseWebBundleJSON(Data(topLevelBundle.utf8))
+    check(topSnap.availableCredit == "25,000 AI credits", "Google top-level aiCreditsRemaining wins over scraped text")
+
+    let scrapedBundle = #"{"usageInfo":{"subscriptionTier":"TIER1","pools":[{"poolType":"GXU_WEEKLY","percentageUsed":0.1,"gxu":{"windowRefreshesAt":"2026-11-20T00:00:00Z"}}]},"email":"a@b.c","scrapedCredits":"1,200 AI credits"}"#
+    let scrapedSnap = try GoogleProvider.parseWebBundleJSON(Data(scrapedBundle.utf8))
+    check(scrapedSnap.availableCredit == "1,200 AI credits", "Google falls back to scraped AI credits text")
 }
 
 @MainActor
@@ -144,6 +165,7 @@ private func runGrokTests() throws {
     )
     check(snap.longWindow?.usedPercentInt == 24, "Grok prioritizes GrokBuild 24% as primary window")
     check(snap.menubarNumbers(mode: .used).map(\.value) == [24], "Grok menubar shows single number [24] from GrokBuild, no dashes")
+    check(snap.availableCredit == "$3.54", "Grok available credit $3.54 parsed")
     check(snap.extraWindows.first?.usedPercentInt == 29, "Total Grok pool 29% kept in detail extraWindows")
     check(!snap.details.contains(where: { $0.label == "Grok Build" }), "Grok Build not duplicated in details")
     check(snap.details.contains(where: { $0.label == "Grok Chat" }), "Grok Chat breakdown preserved in details")

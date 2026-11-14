@@ -134,6 +134,8 @@ public struct ProviderSnapshot: Codable, Equatable, Sendable {
     public var longWindow: QuotaWindow?
     /// Additional model-specific windows (e.g. Sonnet, Opus, Spark)
     public var extraWindows: [QuotaWindow]
+    /// Formatted remaining prepaid / overage credit balance if reported by the provider (e.g. "$3.54", "€55.97", "1,000 credits")
+    public var availableCredit: String?
     /// Additional balance/reset notes
     public var details: [ExtraDetailItem]
     public var errorMessage: String?
@@ -148,6 +150,7 @@ public struct ProviderSnapshot: Codable, Equatable, Sendable {
         shortWindow: QuotaWindow? = nil,
         longWindow: QuotaWindow? = nil,
         extraWindows: [QuotaWindow] = [],
+        availableCredit: String? = nil,
         details: [ExtraDetailItem] = [],
         errorMessage: String? = nil,
         fetchedAt: Date? = nil
@@ -160,6 +163,7 @@ public struct ProviderSnapshot: Codable, Equatable, Sendable {
         self.shortWindow = shortWindow
         self.longWindow = longWindow
         self.extraWindows = extraWindows
+        self.availableCredit = availableCredit
         self.details = details
         self.errorMessage = errorMessage
         self.fetchedAt = fetchedAt

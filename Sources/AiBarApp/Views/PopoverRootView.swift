@@ -235,8 +235,8 @@ private struct ProviderDetailCard: View {
                 windowsSection
             }
 
-            if !snap.details.isEmpty {
-                extraDetailsSection
+            if snap.availableCredit != nil || !snap.details.isEmpty {
+                ProviderCreditsSection(snapshot: snap)
             }
 
             webLinksSection
@@ -394,26 +394,6 @@ private struct ProviderDetailCard: View {
         }
     }
 
-    private var extraDetailsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(snap.details) { item in
-                HStack {
-                    Text(item.label)
-                        .font(.system(size: 11.5))
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Text(item.value)
-                        .font(.system(size: 11.5, weight: .medium).monospacedDigit())
-                }
-            }
-        }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 9)
-                .fill(Color.primary.opacity(0.04))
-        )
-    }
-
     private var webLinksSection: some View {
         HStack(spacing: 8) {
             Button {
@@ -476,6 +456,59 @@ private struct ProviderDetailCard: View {
                 .foregroundColor(.red)
             }
         }
+    }
+}
+
+// MARK: - Shared Available Credit & Extra Details Section
+
+private struct ProviderCreditsSection: View {
+    let snapshot: ProviderSnapshot
+
+    private func isPositiveCredit(_ text: String) -> Bool {
+        if text.lowercased() == "unlimited" { return true }
+        let digitsAndDot = text.filter { $0.isNumber || $0 == "." }
+        if let val = Double(digitsAndDot) {
+            return val > 0.0
+        }
+        return false
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let credit = snapshot.availableCredit, !credit.isEmpty {
+                let positive = isPositiveCredit(credit)
+                HStack(spacing: 6) {
+                    Image(systemName: "creditcard.fill")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(positive ? .green : .secondary)
+                    Text("Available Credit")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text(credit)
+                        .font(.system(size: 12, weight: .bold).monospacedDigit())
+                        .foregroundColor(positive ? .green : .secondary)
+                }
+            }
+
+            ForEach(snapshot.details) { item in
+                HStack {
+                    Text(item.label)
+                        .font(.system(size: 11.5))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text(item.value)
+                        .font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                        .foregroundColor(.primary)
+                }
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 9)
+                .fill(Color.primary.opacity(0.045))
+        )
     }
 }
 
@@ -616,6 +649,10 @@ private struct ProviderSummaryCard: View {
 
             ForEach(snapshot.allWindows) { win in
                 QuotaWindowRow(window: win, mode: mode)
+            }
+
+            if snapshot.availableCredit != nil || !snapshot.details.isEmpty {
+                ProviderCreditsSection(snapshot: snapshot)
             }
         }
         .padding(11)

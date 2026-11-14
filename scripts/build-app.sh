@@ -8,7 +8,7 @@ CONFIG="${1:-release}"
 UNIVERSAL="${UNIVERSAL:-0}"
 APP_NAME="aiBar"
 BUNDLE_ID="sk.lubino.aiBar"
-VERSION="${VERSION:-0.1.2}"
+VERSION="${VERSION:-0.1.3}"
 OUT_DIR="$ROOT_DIR/build"
 APP_BUNDLE="$OUT_DIR/$APP_NAME.app"
 
@@ -20,9 +20,9 @@ else
     echo "==> Building $APP_NAME $VERSION ($CONFIG)…"
 fi
 
-swift build -c "$CONFIG" "${ARCH_FLAGS[@]}" --product "$APP_NAME"
+swift build -c "$CONFIG" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --product "$APP_NAME"
 
-BIN_PATH="$(swift build -c "$CONFIG" "${ARCH_FLAGS[@]}" --show-bin-path)/$APP_NAME"
+BIN_PATH="$(swift build -c "$CONFIG" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"

@@ -37,13 +37,21 @@ public enum GoogleProvider {
             throw ProviderFetchError.unauthorized("Not signed in to Google Gemini")
         }
         let email = root["email"] as? String
+        let scrapedCredits = root["scrapedCredits"] as? String
         if let info = root["usageInfo"] as? [String: Any] {
-            return parseGetUsageInfoObject(info, email: email, authSource: .webSession)
+            var snap = parseGetUsageInfoObject(info, email: email, authSource: .webSession)
+            if snap.availableCredit == nil, let scrapedCredits, !scrapedCredits.isEmpty {
+                snap.availableCredit = scrapedCredits
+            }
+            return snap
         }
         if let html = root["html"] as? String {
             var snap = try parseUsageHTML(html, authSource: .webSession)
             if let email, !email.isEmpty {
                 snap.accountEmail = email
+            }
+            if snap.availableCredit == nil, let scrapedCredits, !scrapedCredits.isEmpty {
+                snap.availableCredit = scrapedCredits
             }
             return snap
         }
@@ -149,7 +157,12 @@ public enum GoogleProvider {
 
         var shortWindow: QuotaWindow?
         var longWindow: QuotaWindow?
-        var details: [ExtraDetailItem] = []
+        var availableCredit: String?
+        let details: [ExtraDetailItem] = []
+
+        if let topCredits = numericDouble(info["aiCreditsRemaining"]) ?? numericDouble(info["creditsRemaining"]) {
+            availableCredit = formatCreditsCount(Int(topCredits))
+        }
 
         if let pools = info["pools"] as? [[String: Any]] {
             for pool in pools {
@@ -182,14 +195,14 @@ public enum GoogleProvider {
                         resetsAt: resetDate,
                         windowSeconds: 7 * 86400
                     )
-                } else if poolType == "OVERAGE_CREDITS",
-                          let overage = pool["overageCreditPool"] as? [String: Any],
-                          let remaining = numericDouble(overage["creditsRemaining"]) {
-                    details.append(ExtraDetailItem(
-                        id: "gemini-overage",
-                        label: "Overage AI Credits",
-                        value: "\(Int(remaining))"
-                    ))
+                } else if poolType == "OVERAGE_CREDITS" {
+                    let overage = (pool["overageCreditPool"] as? [String: Any])
+                        ?? (pool["overage_credit_pool"] as? [String: Any])
+                    if let remaining = numericDouble(overage?["creditsRemaining"])
+                        ?? numericDouble(overage?["credits_remaining"])
+                        ?? numericDouble(pool["creditsRemaining"]) {
+                        availableCredit = formatCreditsCount(Int(remaining))
+                    }
                 }
             }
         }
@@ -203,9 +216,18 @@ public enum GoogleProvider {
             planName: planName,
             shortWindow: shortWindow,
             longWindow: longWindow,
+            availableCredit: availableCredit,
             details: details,
             fetchedAt: Date()
         )
+    }
+
+    private static func formatCreditsCount(_ count: Int) -> String {
+        let fmt = NumberFormatter()
+        fmt.numberStyle = .decimal
+        fmt.locale = Locale(identifier: "en_US")
+        let num = fmt.string(from: NSNumber(value: count)) ?? "\(count)"
+        return "\(num) AI credits"
     }
 
     private static func extractEmail(from html: String) -> String? {

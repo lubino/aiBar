@@ -301,16 +301,18 @@ public enum GrokProvider {
             }
         }
 
-        // Prepaid balance (USD cents)
+        // Prepaid / available credit balance (USD cents)
+        var availableCredit: String?
         if let prepaidObj = config["prepaidBalance"] as? [String: Any] {
             let cents = centVal(prepaidObj) ?? 0
             if cents >= 0 {
-                details.append(ExtraDetailItem(
-                    id: "grok-prepaid",
-                    label: "Prepaid Balance",
-                    value: String(format: "$%.2f", Double(cents) / 100.0)
-                ))
+                availableCredit = String(format: "$%.2f", Double(cents) / 100.0)
             }
+        } else if let onDemandUsed = centVal(config["onDemandUsed"]),
+                  let onDemandCap = centVal(config["onDemandCap"]),
+                  onDemandCap > 0 {
+            let remainingCents = max(0, onDemandCap - onDemandUsed)
+            availableCredit = String(format: "$%.2f", Double(remainingCents) / 100.0)
         }
 
         // Product breakdown (other Grok products when present alongside GrokBuild)
@@ -330,7 +332,7 @@ public enum GrokProvider {
             ?? (config["subscriptionTier"] as? String)
             ?? (root["subscription_tier"] as? String)
 
-        if longWindow == nil && details.isEmpty {
+        if longWindow == nil && availableCredit == nil && details.isEmpty {
             throw ProviderFetchError.parseError("No Grok credit usage returned for this account")
         }
 
@@ -343,6 +345,7 @@ public enum GrokProvider {
             shortWindow: nil,
             longWindow: longWindow,
             extraWindows: extraWindows,
+            availableCredit: availableCredit,
             details: details,
             fetchedAt: Date()
         )

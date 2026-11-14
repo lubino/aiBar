@@ -145,20 +145,33 @@ public final class WebSessionManager: NSObject {
               return JSON.stringify({ authError: orgsRes.status });
             }
             const orgs = await orgsRes.json();
-            const org = Array.isArray(orgs) ? orgs[0] : null;
+            const list = Array.isArray(orgs) ? orgs : [];
+            const org = list.find(o => Array.isArray(o.capabilities) && o.capabilities.some(c => c.includes('chat') || c.includes('claude_pro') || c.includes('claude_max')))
+              || list[0];
             if (!org || !org.uuid) {
               return JSON.stringify({ authError: 401 });
             }
-            const [usageRes, acctRes] = await Promise.all([
+            const [usageRes, acctRes, primaryCreditsRes] = await Promise.all([
               fetch(`/api/organizations/${org.uuid}/usage`, { credentials: 'include' }),
-              fetch('/api/account', { credentials: 'include' }).catch(() => null)
+              fetch('/api/account', { credentials: 'include' }).catch(() => null),
+              fetch(`/api/organizations/${org.uuid}/prepaid/credits`, { credentials: 'include' }).catch(() => null)
             ]);
             if (!usageRes.ok) {
               return JSON.stringify({ authError: usageRes.status });
             }
             const usage = await usageRes.json();
             const account = (acctRes && acctRes.ok) ? await acctRes.json().catch(() => null) : null;
-            return JSON.stringify({ org, usage, account });
+            let prepaidCredits = (primaryCreditsRes && primaryCreditsRes.ok) ? await primaryCreditsRes.json().catch(() => null) : null;
+            if (!prepaidCredits) {
+              const apiOrg = list.find(o => o.uuid && o.uuid !== org.uuid && Array.isArray(o.capabilities) && o.capabilities.includes('api'));
+              if (apiOrg) {
+                const apiCredRes = await fetch(`/api/organizations/${apiOrg.uuid}/prepaid/credits`, { credentials: 'include' }).catch(() => null);
+                if (apiCredRes && apiCredRes.ok) {
+                  prepaidCredits = await apiCredRes.json().catch(() => null);
+                }
+              }
+            }
+            return JSON.stringify({ org, usage, account, prepaidCredits });
             """
 
         case .openai:
@@ -217,6 +230,17 @@ public final class WebSessionManager: NSObject {
             if (html.includes('accounts.google.com/ServiceLogin') && !html.includes('WIZ_global_data')) {
               return JSON.stringify({ signedOut: true });
             }
+            // Fallback: rendered "N AI credits" text, only when the live page is the usage page
+            // (other Gemini pages may contain arbitrary chat text mentioning credits).
+            let scrapedCredits = null;
+            if (/\\/usage\\/?$/.test(location.pathname) && document.body) {
+              const bodyTxt = document.body.innerText || '';
+              const credMatch = bodyTxt.match(/([0-9][0-9,]*)\\s+AI\\s+credits?/i)
+                || bodyTxt.match(/([0-9][0-9,]*)\\s+credits?\\s+(?:left|remaining|available)/i);
+              if (credMatch) {
+                scrapedCredits = credMatch[1] + ' AI credits';
+              }
+            }
             let fullChunk = '';
             const scripts = html.matchAll(/<script(?:\\s+[^>]*)?>([\\s\\S]*?)<\\/script>/gi);
             for (const m of scripts) {
@@ -236,17 +260,17 @@ public final class WebSessionManager: NSObject {
                   .map(i => i && i.data && i.data.viewer && i.data.viewer.rpcs ? i.data.viewer.rpcs.getUsageInfo : null)
                   .find(Boolean);
                 if (info) {
-                  return JSON.stringify({ usageInfo: info, email });
+                  return JSON.stringify({ usageInfo: info, email, scrapedCredits });
                 }
                 const isFree = (Array.isArray(arr) ? arr : []).some(i => i && i.data && i.data.viewer === null)
                   || html.includes('DATA_FETCHING_EXCEPTION')
                   || html.includes('gemini_out_of_quota_input_inline_upgrade_banner');
                 if (isFree) {
-                  return JSON.stringify({ usageInfo: { subscriptionTier: 'FREE', isFree: true, pools: [] }, email });
+                  return JSON.stringify({ usageInfo: { subscriptionTier: 'FREE', isFree: true, pools: [] }, email, scrapedCredits });
                 }
               } catch (_) {}
             }
-            return JSON.stringify({ html, email });
+            return JSON.stringify({ html, email, scrapedCredits });
             """
 
         case .grok:
