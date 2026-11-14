@@ -118,6 +118,9 @@ swift run AiBarTests
 # Build & ad-hoc sign release app bundle -> build/aiBar.app
 ./scripts/build-app.sh
 
+# Build Universal (arm64 + x86_64) release DMG + ZIP + SHA256SUMS.txt -> build/
+./scripts/package-dmg.sh
+
 # Dump live provider snapshots as JSON from CLI
 ./build/aiBar.app/Contents/MacOS/aiBar --json
 
@@ -136,3 +139,4 @@ When the user says **push**:
 1. Run `swift run AiBarTests` and verify `git status` / `git diff` contain no secrets or build artifacts.
 2. Patch-bump `VERSION="MAJOR.MINOR.PATCH"` in `scripts/build-app.sh`.
 3. Stage all intended files (`git add`), commit in English explaining **what** and **why**, and `git push` to `origin` (`git@github.com:lubino/aiBar.git`, branch `main`).
+4. When cutting a downloadable GitHub Release (DMG + ZIP for `install.sh`), also tag the matching SemVer (`git tag vX.Y.Z && git push origin vX.Y.Z`) so `.github/workflows/release.yml` automatically builds and publishes `aiBar.dmg`, `aiBar-macos.zip`, and `SHA256SUMS.txt` on GitHub Releases.

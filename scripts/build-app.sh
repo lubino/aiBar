@@ -5,16 +5,24 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 CONFIG="${1:-release}"
+UNIVERSAL="${UNIVERSAL:-0}"
 APP_NAME="aiBar"
 BUNDLE_ID="sk.lubino.aiBar"
-VERSION="0.1.0"
+VERSION="${VERSION:-0.1.1}"
 OUT_DIR="$ROOT_DIR/build"
 APP_BUNDLE="$OUT_DIR/$APP_NAME.app"
 
-echo "==> Building $APP_NAME ($CONFIG)…"
-swift build -c "$CONFIG" --product "$APP_NAME"
+ARCH_FLAGS=()
+if [[ "$UNIVERSAL" == "1" ]]; then
+    ARCH_FLAGS=(--arch arm64 --arch x86_64)
+    echo "==> Building $APP_NAME $VERSION ($CONFIG, universal arm64+x86_64)…"
+else
+    echo "==> Building $APP_NAME $VERSION ($CONFIG)…"
+fi
 
-BIN_PATH="$(swift build -c "$CONFIG" --show-bin-path)/$APP_NAME"
+swift build -c "$CONFIG" "${ARCH_FLAGS[@]}" --product "$APP_NAME"
+
+BIN_PATH="$(swift build -c "$CONFIG" "${ARCH_FLAGS[@]}" --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
@@ -52,7 +60,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key>
     <string>${VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>${VERSION}</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
@@ -65,5 +73,6 @@ PLIST
 
 echo "==> Ad-hoc signing ${APP_BUNDLE}…"
 codesign --force --deep --sign - "$APP_BUNDLE"
+codesign --verify --deep --strict "$APP_BUNDLE"
 
 echo "==> Built: ${APP_BUNDLE}"

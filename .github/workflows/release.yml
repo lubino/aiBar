@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.1.1)"
+        required: true
+        default: "v0.1.1"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Universal macOS DMG & Publish Release
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure Swift 6+ toolchain
+        run: |
+          if ! swift --version | grep -qE "Swift version [6-9]\."; then
+            NEWEST_XCODE="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -n 1 || true)"
+            if [[ -n "$NEWEST_XCODE" ]]; then
+              sudo xcode-select -s "$NEWEST_XCODE/Contents/Developer"
+            fi
+          fi
+          swift --version
+
+      - name: Run unit tests
+        run: swift run AiBarTests
+
+      - name: Package Universal aiBar.dmg & aiBar-macos.zip
+        run: |
+          RAW_TAG="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          CLEAN_VERSION="${RAW_TAG#v}"
+          VERSION="$CLEAN_VERSION" UNIVERSAL=1 ./scripts/package-dmg.sh
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || inputs.tag }}
+          generate_release_notes: true
+          files: |
+            build/aiBar.dmg
+            build/aiBar-macos.zip
+            build/SHA256SUMS.txt
+          body: |
+            ### Quick Install (Recommended — no Gatekeeper prompt)
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/lubino/aiBar/main/install.sh | bash
+            ```
+
+            ### Direct DMG Download
+            Download **`aiBar.dmg`** below, open it, and drag **`aiBar.app`** into **`Applications`**.
+            *(Because builds are ad-hoc signed without a paid Apple Developer ID, if macOS blocks the browser-downloaded DMG on first launch, run `xattr -cr /Applications/aiBar.app` in Terminal or click **Open Anyway** in **System Settings → Privacy & Security**.)*

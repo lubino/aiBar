@@ -41,20 +41,47 @@ Checking how much AI quota you have left—or when your window resets—usually 
 
 ---
 
-## Installation & Building from Source
+## Install
 
-**Requirements:** macOS 14 (Sonoma) or newer. To compile from source, only **macOS Command Line Tools** (`xcode-select --install`) with Swift 6+ are needed—full Xcode is not required.
+Requires **macOS 14 (Sonoma)** or newer (Universal binary: Apple Silicon & Intel).
+
+### Option 1: One-Line Terminal Install *(Recommended)*
+
+Paste this into **Terminal** to download the latest Universal release, verify its SHA-256 checksum, install `aiBar.app` into `/Applications` (no `sudo` needed), and launch it immediately without browser Gatekeeper prompts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lubino/aiBar/main/install.sh | bash
+```
+
+To update `aiBar` later, run the same command again. To uninstall:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lubino/aiBar/main/install.sh | bash -s -- --uninstall
+```
+
+### Option 2: Download `.dmg` from GitHub Releases
+
+1. Download **`aiBar.dmg`** from the **[Latest GitHub Release](https://github.com/lubino/aiBar/releases/latest)**.
+2. Open `aiBar.dmg` and drag **`aiBar.app`** into **`Applications`**.
+3. *First-launch note:* `aiBar` is open-source and ad-hoc signed rather than notarized with a paid Apple Developer ID. If macOS Gatekeeper blocks a browser-downloaded `.dmg`, either choose **Open Anyway** in **System Settings → Privacy & Security**, or clear the browser quarantine attribute once in Terminal:
+   ```bash
+   xattr -cr /Applications/aiBar.app && open /Applications/aiBar.app
+   ```
+
+### Option 3: Build from Source
+
+Only **macOS Command Line Tools** (`xcode-select --install`) with Swift 6+ are required—full Xcode is not needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lubino/aiBar/main/install.sh | bash -s -- --from-source
+```
+
+Or manually from a local clone:
 
 ```bash
 git clone https://github.com/lubino/aiBar.git
 cd aiBar
-
-# Build the signed release bundle (build/aiBar.app)
-./scripts/build-app.sh
-
-# Install to /Applications and launch
-cp -R build/aiBar.app /Applications/
-open /Applications/aiBar.app
+./scripts/package-dmg.sh   # produces build/aiBar.app, build/aiBar.dmg, and build/aiBar-macos.zip
 ```
 
 ---
