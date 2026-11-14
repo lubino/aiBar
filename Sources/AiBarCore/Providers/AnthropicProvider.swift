@@ -44,11 +44,19 @@ public enum AnthropicProvider {
             throw ProviderFetchError.networkError("Anthropic HTTP \(http.statusCode)")
         }
 
-        // Best-effort profile lookup with short timeout
+        // Best-effort profile + prepaid credits lookup with short timeout
         let profile = await fetchOAuthProfile(token: token)
+        var creditsData: Data?
+        if let profile,
+           let profJSON = try? JSONSerialization.jsonObject(with: profile) as? [String: Any],
+           let org = profJSON["organization"] as? [String: Any],
+           let orgUUID = org["uuid"] as? String, !orgUUID.isEmpty {
+            creditsData = await fetchOAuthPrepaidCredits(token: token, orgUUID: orgUUID)
+        }
         return try parseUsagePayload(
             usageData: data,
             profileData: profile,
+            prepaidCreditsData: creditsData,
             authSource: source,
             fallbackPlan: fallbackPlan
         )
@@ -62,6 +70,23 @@ public enum AnthropicProvider {
         req.setValue("claude-code/2.1.0", forHTTPHeaderField: "User-Agent")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         return try? await URLSession.shared.data(for: req).0
+    }
+
+    private static func fetchOAuthPrepaidCredits(token: String, orgUUID: String) async -> Data? {
+        guard let url = URL(string: "https://api.anthropic.com/api/oauth/organizations/\(orgUUID)/prepaid/credits") else {
+            return nil
+        }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 3.0
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        req.setValue("claude-code/2.1.0", forHTTPHeaderField: "User-Agent")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            return nil
+        }
+        return data
     }
 
     public static func fetchViaCookieHeader(cookieHeader: String) async throws -> ProviderSnapshot {
@@ -103,10 +128,22 @@ public enum AnthropicProvider {
             throw ProviderFetchError.networkError("Failed to read Claude usage")
         }
 
+        var creditsReq = URLRequest(url: URL(string: "https://claude.ai/api/organizations/\(orgUUID)/prepaid/credits")!)
+        creditsReq.timeoutInterval = 4
+        creditsReq.setValue(normalizedCookie, forHTTPHeaderField: "Cookie")
+        creditsReq.setValue(safariUA, forHTTPHeaderField: "User-Agent")
+        creditsReq.setValue("application/json", forHTTPHeaderField: "Accept")
+        let creditsData: Data? = await {
+            guard let (d, r) = try? await URLSession.shared.data(for: creditsReq),
+                  let h = r as? HTTPURLResponse, (200...299).contains(h.statusCode) else { return nil }
+            return d
+        }()
+
         let plan = inferWebOrgPlan(firstOrg)
         return try parseUsagePayload(
             usageData: usageData,
             profileData: nil,
+            prepaidCreditsData: creditsData,
             authSource: .manualToken,
             fallbackPlan: plan
         )
@@ -125,6 +162,9 @@ public enum AnthropicProvider {
             throw ProviderFetchError.parseError("Missing Claude usage object")
         }
         let usageData = try JSONSerialization.data(withJSONObject: usageObj)
+        let creditsData: Data? = (root["prepaidCredits"] as? [String: Any]).flatMap {
+            try? JSONSerialization.data(withJSONObject: $0)
+        }
 
         var email: String?
         if let account = root["account"] as? [String: Any] {
@@ -138,6 +178,7 @@ public enum AnthropicProvider {
         var snapshot = try parseUsagePayload(
             usageData: usageData,
             profileData: nil,
+            prepaidCreditsData: creditsData,
             authSource: .webSession,
             fallbackPlan: plan
         )
@@ -150,6 +191,7 @@ public enum AnthropicProvider {
     public static func parseUsagePayload(
         usageData: Data,
         profileData: Data? = nil,
+        prepaidCreditsData: Data? = nil,
         authSource: AuthSourceKind,
         fallbackPlan: String? = nil
     ) throws -> ProviderSnapshot {
@@ -252,22 +294,38 @@ public enum AnthropicProvider {
             }
         }
 
-        // 3. Extra usage / spend summary
+        // 3. Prepaid Credit Balance & Extra usage
+        var availableCredit: String?
+        if let prepaidCreditsData,
+           let creditsJSON = try? JSONSerialization.jsonObject(with: prepaidCreditsData) as? [String: Any] {
+            availableCredit = parsePrepaidCreditsString(creditsJSON)
+        }
+        if availableCredit == nil,
+           let cloudPromo = usage["iguana_necktie"] as? [String: Any],
+           let remDollars = numericDouble(cloudPromo["remaining_dollars"]) {
+            availableCredit = formatCurrency(amount: remDollars, currency: "USD")
+        }
+
         if let extra = usage["extra_usage"] as? [String: Any],
            (extra["is_enabled"] as? Bool) == true {
             let currency = (extra["currency"] as? String) ?? "USD"
             if let used = numericDouble(extra["used_credits"]) {
                 if let limit = numericDouble(extra["monthly_limit"]), limit > 0 {
-                    details.append(ExtraDetailItem(
-                        id: "claude-extra",
-                        label: "Extra Usage",
-                        value: String(format: "%.2f / %.2f %@", used / 100.0, limit / 100.0, currency)
-                    ))
+                    let remainingCap = max(0.0, (limit - used) / 100.0)
+                    if availableCredit == nil {
+                        availableCredit = formatCurrency(amount: remainingCap, currency: currency)
+                    } else {
+                        details.append(ExtraDetailItem(
+                            id: "claude-extra",
+                            label: "Monthly Cap Left",
+                            value: formatCurrency(amount: remainingCap, currency: currency)
+                        ))
+                    }
                 } else if used > 0 {
                     details.append(ExtraDetailItem(
                         id: "claude-extra",
                         label: "Extra Usage",
-                        value: String(format: "%.2f %@", used / 100.0, currency)
+                        value: formatCurrency(amount: used / 100.0, currency: currency)
                     ))
                 }
             }
@@ -311,9 +369,35 @@ public enum AnthropicProvider {
             shortWindow: shortWindow,
             longWindow: longWindow,
             extraWindows: extraWindows,
+            availableCredit: availableCredit,
             details: details,
             fetchedAt: Date()
         )
+    }
+
+    private static func parsePrepaidCreditsString(_ json: [String: Any]) -> String? {
+        if let bal = json["balance"] as? [String: Any],
+           let money = (bal["money"] as? [String: Any]) ?? (bal["credits"] as? [String: Any]),
+           let minor = numericDouble(money["amount_minor"]) {
+            let exp = Int(numericDouble(money["exponent"]) ?? 2)
+            let currency = (money["currency"] as? String) ?? (json["currency"] as? String) ?? "USD"
+            let divisor = pow(10.0, Double(max(0, min(4, exp))))
+            return formatCurrency(amount: minor / divisor, currency: currency)
+        }
+        if let minor = numericDouble(json["amount"]) {
+            let currency = (json["currency"] as? String) ?? "USD"
+            return formatCurrency(amount: minor / 100.0, currency: currency)
+        }
+        return nil
+    }
+
+    private static func formatCurrency(amount: Double, currency: String) -> String {
+        switch currency.uppercased() {
+        case "USD": return String(format: "$%.2f", amount)
+        case "EUR": return String(format: "€%.2f", amount)
+        case "GBP": return String(format: "£%.2f", amount)
+        default: return String(format: "%.2f %@", amount, currency.uppercased())
+        }
     }
 
     private static func inferWebOrgPlan(_ org: [String: Any]) -> String? {
