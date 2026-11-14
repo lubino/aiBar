@@ -4,6 +4,10 @@ Ultra-compact native macOS menu bar monitor for AI subscription usage limits acr
 
 ![aiBar in the macOS menu bar](menu.png)
 
+<p align="center">
+  <img src="popup.png" width="380" alt="aiBar detail popover showing Google, Anthropic, OpenAI, and Grok quotas" />
+</p>
+
 ## Why aiBar
 
 Checking how much AI quota you have left—or when your window resets—usually means switching browser tabs and digging through account settings across four different websites. **aiBar** puts your active weekly usage percentages right in the macOS menu bar as a single minimal item, with full rolling-window details and reset times one click away.
