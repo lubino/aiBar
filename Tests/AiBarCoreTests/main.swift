@@ -136,6 +136,33 @@ private func runGoogleTests() throws {
     let scrapedBundle = #"{"usageInfo":{"subscriptionTier":"TIER1","pools":[{"poolType":"GXU_WEEKLY","percentageUsed":0.1,"gxu":{"windowRefreshesAt":"2026-11-20T00:00:00Z"}}]},"email":"a@b.c","scrapedCredits":"1,200 AI credits"}"#
     let scrapedSnap = try GoogleProvider.parseWebBundleJSON(Data(scrapedBundle.utf8))
     check(scrapedSnap.availableCredit == "1,200 AI credits", "Google falls back to scraped AI credits text")
+
+    // Real /usage shape: balance only appears as the AI-credits intervention card title in deferred chunks.
+    let g1Item = #"{"data":{"__typename":"ViewerRpcs","getG1Interventions":{"interventionEntries":[{"onrampContext":{"geminiUsageSettingsAiCreditsUpsellCard":null},"intervention":{"interventionCard":null}},{"onrampContext":{"geminiUsageSettingsUpgradeBanner":{"__typename":"X"}},"intervention":{"advancedCard":{"title":{"htmlText":{"privateDoNotAccessOrElseSafeHtmlWrappedValue":"Get 5x more usage with AI Ultra"}}}}},{"onrampContext":{"geminiUsageSettingsAiCreditsUpsellCard":{"__typename":"Y"}},"intervention":{"interventionCard":{"title":{"htmlText":{"privateDoNotAccessOrElseSafeHtmlWrappedValue":"2,500 AI credits"},"markdownText":null}}}}]}},"path":["viewer"]}"#
+    let g1Bundle = #"{"usageInfo":{"subscriptionTier":"TIER1","useOverageAiCredits":false,"pools":[{"poolType":"GXU_WEEKLY","percentageUsed":0.001,"gxu":{"windowRefreshesAt":"2026-11-18T06:01:43Z"}}]},"email":"a@b.c","scrapedCredits":null,"g1Interventions":["# + g1Item + #"]}"#
+    let g1Snap = try GoogleProvider.parseWebBundleJSON(Data(g1Bundle.utf8))
+    check(g1Snap.availableCredit == "2,500 AI credits", "Google AI credits read from getG1Interventions card title")
+
+    let zeroItem = g1Item.replacingOccurrences(of: "2,500 AI credits", with: "0 AI credits")
+    let zeroItems = try JSONSerialization.jsonObject(with: Data("[\(zeroItem)]".utf8)) as! [Any]
+    check(GoogleProvider.extractAiCreditsBalance(fromChunkItems: zeroItems) == "0 AI credits", "Google zero AI credits balance still shown")
+
+    // AI Studio (Gemini API) billing bundle captured from aistudio.google.com/billing.
+    let aisBundle = #"""
+    {"billingAccounts":[[["billingAccounts/X","My Billing Account","CZK",30,null,[1,2],5470.8373995742768,1,1,1,1,2,"CZK"]]],
+     "credits":[[["GCP Free Credit","billingAccounts/X",["CZK","6565",10000000],["CZK"],["CZK","6565",10000000],"Starter:Credit-X",[4],["1794643200"],["1802512102",833671000]]]],
+     "eligibleText":"CZK 0 eligible GCP credits","totalCostText":"Kč 176.92"}
+    """#
+    var gSnap = g1Snap
+    GoogleProvider.applyAIStudioBilling(Data(aisBundle.utf8), to: &gSnap)
+    let byID = Dictionary(uniqueKeysWithValues: gSnap.details.map { ($0.id, $0.value) })
+    check(byID["gemini-api-credits"] == "CZK 0", "Gemini API eligible credits parsed from page text")
+    check(byID["gemini-api-cost"] == "Kč 176.92", "Gemini API month cost parsed")
+    check(byID["gemini-api-cap"] == "CZK 5,470.84", "Gemini API billing tier cap parsed")
+    check(byID["gemini-gcp-credit-0"]?.hasPrefix("CZK 6,565.01 · until 13 Feb 2027") == true, "GCP free credit remaining + expiry parsed")
+    check(gSnap.availableCredit == "2,500 AI credits", "Gemini API billing does not override AI credits")
+    GoogleProvider.applyAIStudioBilling(Data(aisBundle.utf8), to: &gSnap)
+    check(gSnap.details.filter { $0.id.hasPrefix("gemini-") }.count == 4, "Re-applying AI Studio billing does not duplicate rows")
 }
 
 @MainActor

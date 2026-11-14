@@ -54,6 +54,91 @@ public final class WebSessionManager: NSObject {
         return cfg
     }
 
+    /// Captures AI Studio `MakerSuiteService` billing RPC responses (XHR, JSPB) issued by the billing page.
+    static let aiStudioInterceptorSource = """
+    (() => {
+      if (window.__aibarAISHooked) return;
+      window.__aibarAISHooked = true;
+      window.__aibarAIS = {};
+      const wanted = ['ListBillingAccounts', 'BatchGetCredits'];
+      const oo = XMLHttpRequest.prototype.open, os = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function(m, u) { this.__aibarUrl = String(u || ''); return oo.apply(this, arguments); };
+      XMLHttpRequest.prototype.send = function() {
+        const key = wanted.find(k => this.__aibarUrl && this.__aibarUrl.includes('MakerSuiteService/' + k));
+        if (key) {
+          this.addEventListener('load', () => {
+            try { window.__aibarAIS[key] = JSON.parse(this.responseText); } catch (_) {}
+          });
+        }
+        return os.apply(this, arguments);
+      };
+    })();
+    """
+
+    static let aiStudioProbeSource = """
+    const cap = window.__aibarAIS || {};
+    const credEl = document.querySelector('ms-billing-credits');
+    const eligibleText = credEl ? (credEl.innerText || '').trim() : null;
+    let totalCostText = null;
+    const txt = document.body ? (document.body.innerText || '') : '';
+    const m = txt.match(/\\n\\s*Total cost\\s*\\n\\s*([^\\n]{1,32})/);
+    if (m) totalCostText = m[1].trim();
+    return JSON.stringify({
+      signedOut: location.hostname.includes('accounts.google.com'),
+      billingAccounts: cap.ListBillingAccounts || null,
+      credits: cap.BatchGetCredits || null,
+      eligibleText, totalCostText
+    });
+    """
+
+    /// Best-effort Gemini API billing probe on `aistudio.google.com/billing` (same Google session cookies).
+    /// Returns nil when the user has no AI Studio billing account or the page did not load in time.
+    public func fetchAIStudioBilling(timeout: TimeInterval = 20) async -> Data? {
+        let cfg = WKWebViewConfiguration()
+        cfg.websiteDataStore = .default()
+        cfg.userContentController.addUserScript(WKUserScript(
+            source: Self.aiStudioInterceptorSource,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1280, height: 900), configuration: cfg)
+        webView.customUserAgent = Self.safariUserAgent
+        defer { webView.stopLoading() }
+
+        let loader = PageLoadAwaiter()
+        webView.navigationDelegate = loader
+        guard let url = URL(string: "https://aistudio.google.com/billing") else { return nil }
+        do {
+            try await loader.load(url: url, in: webView, timeout: timeout)
+        } catch {
+            return nil
+        }
+
+        // The SPA issues billing RPCs and renders the cost chart after the initial load.
+        let deadline = Date().addingTimeInterval(timeout)
+        var last: [String: Any]?
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard let raw = try? await webView.callAsyncJavaScript(
+                Self.aiStudioProbeSource, arguments: [:], in: nil, contentWorld: .page
+            ) as? String,
+                let obj = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any] else { continue }
+            if (obj["signedOut"] as? Bool) == true { return nil }
+            last = obj
+            let hasAccounts = !(obj["billingAccounts"] is NSNull) && obj["billingAccounts"] != nil
+            let hasCredits = !(obj["credits"] is NSNull) && obj["credits"] != nil
+            let hasEligible = (obj["eligibleText"] as? String)?.isEmpty == false
+            let hasCost = (obj["totalCostText"] as? String)?.isEmpty == false
+            if hasAccounts && hasCredits && hasEligible && hasCost { break }
+        }
+        guard let last, last["billingAccounts"] as? [Any] != nil else { return nil }
+        let data = try? JSONSerialization.data(withJSONObject: last)
+        if let data, let dumpDir = ProcessInfo.processInfo.environment["AIBAR_DUMP_DIR"], !dumpDir.isEmpty {
+            try? data.write(to: URL(fileURLWithPath: dumpDir).appendingPathComponent("google-aistudio-billing.json"))
+        }
+        return data
+    }
+
     /// Runs an off-screen WKWebView refresh using the persistent WebsiteDataStore.
     public func fetchWebQuota(for provider: ProviderID) async throws -> ProviderSnapshot {
         let cfg = makeWebViewConfiguration(for: provider)
@@ -78,6 +163,11 @@ public final class WebSessionManager: NSObject {
         let jsonString = try await runProviderScript(for: provider, in: webView)
         guard let data = jsonString.data(using: .utf8) else {
             throw ProviderFetchError.parseError("Empty response from \(provider.displayName) web session")
+        }
+        // Opt-in diagnostics: AIBAR_DUMP_DIR=/some/dir dumps raw web payloads (may contain account data).
+        if let dumpDir = ProcessInfo.processInfo.environment["AIBAR_DUMP_DIR"], !dumpDir.isEmpty {
+            let url = URL(fileURLWithPath: dumpDir).appendingPathComponent("\(provider.rawValue)-web.json")
+            try? data.write(to: url)
         }
 
         switch provider {
@@ -259,14 +349,17 @@ public final class WebSessionManager: NSObject {
                 const info = (Array.isArray(arr) ? arr : [])
                   .map(i => i && i.data && i.data.viewer && i.data.viewer.rpcs ? i.data.viewer.rpcs.getUsageInfo : null)
                   .find(Boolean);
+                // Deferred chunks carry the AI credits balance card ("N AI credits") via getG1Interventions.
+                const g1Interventions = (Array.isArray(arr) ? arr : [])
+                  .filter(i => i && i.data && i.data.getG1Interventions);
                 if (info) {
-                  return JSON.stringify({ usageInfo: info, email, scrapedCredits });
+                  return JSON.stringify({ usageInfo: info, email, scrapedCredits, g1Interventions });
                 }
                 const isFree = (Array.isArray(arr) ? arr : []).some(i => i && i.data && i.data.viewer === null)
                   || html.includes('DATA_FETCHING_EXCEPTION')
                   || html.includes('gemini_out_of_quota_input_inline_upgrade_banner');
                 if (isFree) {
-                  return JSON.stringify({ usageInfo: { subscriptionTier: 'FREE', isFree: true, pools: [] }, email, scrapedCredits });
+                  return JSON.stringify({ usageInfo: { subscriptionTier: 'FREE', isFree: true, pools: [] }, email, scrapedCredits, g1Interventions });
                 }
               } catch (_) {}
             }

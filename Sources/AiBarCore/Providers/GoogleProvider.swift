@@ -40,6 +40,9 @@ public enum GoogleProvider {
         let scrapedCredits = root["scrapedCredits"] as? String
         if let info = root["usageInfo"] as? [String: Any] {
             var snap = parseGetUsageInfoObject(info, email: email, authSource: .webSession)
+            if snap.availableCredit == nil, let items = root["g1Interventions"] as? [Any] {
+                snap.availableCredit = extractAiCreditsBalance(fromChunkItems: items)
+            }
             if snap.availableCredit == nil, let scrapedCredits, !scrapedCredits.isEmpty {
                 snap.availableCredit = scrapedCredits
             }
@@ -97,7 +100,11 @@ public enum GoogleProvider {
                    let viewer = dataObj["viewer"] as? [String: Any],
                    let rpcs = viewer["rpcs"] as? [String: Any],
                    let info = rpcs["getUsageInfo"] as? [String: Any] {
-                    return parseGetUsageInfoObject(info, email: email, authSource: authSource)
+                    var snap = parseGetUsageInfoObject(info, email: email, authSource: authSource)
+                    if snap.availableCredit == nil {
+                        snap.availableCredit = extractAiCreditsBalance(fromChunkItems: arr)
+                    }
+                    return snap
                 }
             }
 
@@ -222,6 +229,140 @@ public enum GoogleProvider {
         )
     }
 
+    // MARK: - Gemini API billing (AI Studio)
+
+    /// Merges Gemini API billing info captured from `aistudio.google.com/billing` into the Google snapshot.
+    ///
+    /// Expected bundle (built by the WebKit probe):
+    /// - `billingAccounts`: raw `MakerSuiteService/ListBillingAccounts` JSPB response
+    ///   (`[[[name, displayName, currency, ?, ?, [..], tierCapAmount, ...]]]`)
+    /// - `credits`: raw `MakerSuiteService/BatchGetCredits` response
+    ///   (`[[[title, account, original Money, [currency], remaining Money, id, [status], [start], [expire]]]]`,
+    ///   Money = `[currency, "units", nanos]`)
+    /// - `eligibleText`: page text such as "CZK 0 eligible GCP credits" (the amount AI Studio counts for the API)
+    /// - `totalCostText`: this month's total cost as rendered on the page (e.g. "Kč 176.92")
+    public static func applyAIStudioBilling(_ data: Data, to snapshot: inout ProviderSnapshot) {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        var items: [ExtraDetailItem] = []
+
+        var accountCurrency: String?
+        var tierCap: Double?
+        if let outer = root["billingAccounts"] as? [Any],
+           let accounts = outer.first as? [Any],
+           let account = accounts.first as? [Any] {
+            if account.count > 2 { accountCurrency = account[2] as? String }
+            if account.count > 6 { tierCap = numericDouble(account[6]) }
+        }
+
+        if let text = (root["eligibleText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let eligible = parseEligibleCreditsText(text) {
+            items.append(ExtraDetailItem(id: "gemini-api-credits", label: "API Credits (eligible)", value: eligible))
+        }
+
+        if let cost = (root["totalCostText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !cost.isEmpty, cost.count <= 32 {
+            items.append(ExtraDetailItem(id: "gemini-api-cost", label: "API Cost (This Month)", value: cost))
+        }
+
+        if let tierCap, let accountCurrency {
+            items.append(ExtraDetailItem(id: "gemini-api-cap", label: "API Billing Tier Cap", value: formatMoney(tierCap, currency: accountCurrency)))
+        }
+
+        if let outer = root["credits"] as? [Any], let credits = outer.first as? [Any] {
+            for (idx, raw) in credits.enumerated() {
+                guard let credit = raw as? [Any], credit.count > 4,
+                      let remaining = parseMoney(credit[4]), remaining.amount > 0 else { continue }
+                let title = (credit[0] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "GCP Credit"
+                var value = formatMoney(remaining.amount, currency: remaining.currency)
+                if credit.count > 8,
+                   let expire = credit[8] as? [Any],
+                   let secs = numericDouble(expire.first) {
+                    let fmt = DateFormatter()
+                    fmt.locale = Locale(identifier: "en_US_POSIX")
+                    fmt.dateFormat = "d MMM yyyy"
+                    value += " · until " + fmt.string(from: Date(timeIntervalSince1970: secs))
+                }
+                items.append(ExtraDetailItem(id: "gemini-gcp-credit-\(idx)", label: title, value: value))
+            }
+        }
+
+        snapshot.details.removeAll { $0.id.hasPrefix("gemini-api-") || $0.id.hasPrefix("gemini-gcp-credit-") }
+        snapshot.details.append(contentsOf: items)
+    }
+
+    /// "CZK 0 eligible GCP credits" -> "CZK 0"
+    static func parseEligibleCreditsText(_ text: String) -> String? {
+        let normalized = text.replacingOccurrences(of: "\u{00A0}", with: " ")
+        guard let range = normalized.range(of: "eligible", options: .caseInsensitive) else { return nil }
+        let amount = normalized[..<range.lowerBound].trimmingCharacters(in: .whitespaces)
+        guard amount.contains(where: \.isNumber) else { return nil }
+        return amount
+    }
+
+    private static func parseMoney(_ raw: Any?) -> (amount: Double, currency: String)? {
+        guard let arr = raw as? [Any], arr.count >= 2, let currency = arr[0] as? String else { return nil }
+        let units = numericDouble(arr[1]) ?? 0
+        let nanos = arr.count > 2 ? (numericDouble(arr[2]) ?? 0) : 0
+        return (units + nanos / 1_000_000_000, currency)
+    }
+
+    private static func formatMoney(_ amount: Double, currency: String) -> String {
+        let fmt = NumberFormatter()
+        fmt.numberStyle = .decimal
+        fmt.locale = Locale(identifier: "en_US")
+        fmt.minimumFractionDigits = 2
+        fmt.maximumFractionDigits = 2
+        let num = fmt.string(from: NSNumber(value: amount)) ?? String(format: "%.2f", amount)
+        switch currency.uppercased() {
+        case "USD": return "$" + num
+        case "EUR": return "€" + num
+        case "GBP": return "£" + num
+        default: return "\(currency.uppercased()) \(num)"
+        }
+    }
+
+    /// Reads the Google AI credits balance from the `/usage` page's deferred `getG1Interventions`
+    /// chunks. The balance is not part of `getUsageInfo`; it is only rendered as the title of the
+    /// `geminiUsageSettingsAiCreditsUpsellCard` intervention card (e.g. "0 AI credits", "+ Add").
+    public static func extractAiCreditsBalance(fromChunkItems items: [Any]) -> String? {
+        var found: String?
+        func walk(_ node: Any) {
+            guard found == nil else { return }
+            if let dict = node as? [String: Any] {
+                if let entries = dict["interventionEntries"] as? [[String: Any]] {
+                    for entry in entries {
+                        guard let ctx = entry["onrampContext"] as? [String: Any],
+                              ctx["geminiUsageSettingsAiCreditsUpsellCard"] is [String: Any],
+                              let intervention = entry["intervention"] as? [String: Any],
+                              let card = intervention["interventionCard"] as? [String: Any],
+                              let title = card["title"] as? [String: Any] else { continue }
+                        let text = ((title["htmlText"] as? [String: Any])?["privateDoNotAccessOrElseSafeHtmlWrappedValue"] as? String)
+                            ?? (title["markdownText"] as? String)
+                        if let text, let parsed = parseAiCreditsTitle(text) {
+                            found = parsed
+                            return
+                        }
+                    }
+                }
+                for value in dict.values { walk(value) }
+            } else if let arr = node as? [Any] {
+                for value in arr { walk(value) }
+            }
+        }
+        for item in items { walk(item) }
+        return found
+    }
+
+    private static func parseAiCreditsTitle(_ text: String) -> String? {
+        let pattern = #"([0-9][0-9.,\s\u00A0\u202F]*)\s*AI\s+credits?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let m = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let r = Range(m.range(at: 1), in: text) else { return nil }
+        let digits = text[r].filter(\.isNumber)
+        guard let count = Int(digits) else { return nil }
+        return formatCreditsCount(count)
+    }
+
     private static func formatCreditsCount(_ count: Int) -> String {
         let fmt = NumberFormatter()
         fmt.numberStyle = .decimal
@@ -251,6 +392,7 @@ public enum GoogleProvider {
         if let d = value as? Double { return d }
         if let i = value as? Int { return Double(i) }
         if let n = value as? NSNumber { return n.doubleValue }
+        if let str = value as? String { return Double(str.trimmingCharacters(in: .whitespaces)) }
         return nil
     }
 }

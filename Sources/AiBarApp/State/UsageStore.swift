@@ -269,7 +269,12 @@ public final class UsageStore: ObservableObject {
 
             // 2. WebKit session
             if hasWeb {
-                return try await WebSessionManager.shared.fetchWebQuota(for: .google)
+                var snap = try await WebSessionManager.shared.fetchWebQuota(for: .google)
+                // Best-effort Gemini API billing (AI Studio) using the same Google web session.
+                if let billing = await WebSessionManager.shared.fetchAIStudioBilling() {
+                    GoogleProvider.applyAIStudioBilling(billing, to: &snap)
+                }
+                return snap
             }
             return nil
 
