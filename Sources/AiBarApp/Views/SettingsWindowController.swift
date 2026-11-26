@@ -9,7 +9,7 @@ public final class SettingsWindowController: NSWindowController, NSWindowDelegat
 
     private init() {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 450),
+            contentRect: NSRect(x: 0, y: 0, width: 528, height: 450),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -17,7 +17,9 @@ public final class SettingsWindowController: NSWindowController, NSWindowDelegat
         win.title = "aiBar Settings"
         win.center()
         win.isReleasedWhenClosed = false
-        win.contentViewController = NSHostingController(rootView: SettingsRootView(store: UsageStore.shared))
+        let hosting = NSHostingController(rootView: SettingsRootView(store: UsageStore.shared))
+        hosting.sizingOptions = [.preferredContentSize]
+        win.contentViewController = hosting
         super.init(window: win)
         win.delegate = self
     }
@@ -149,6 +151,23 @@ private struct SettingsRootView: View {
                 .padding(8)
             }
 
+            GroupBox("About") {
+                HStack(spacing: 12) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .frame(width: 40, height: 40)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("aiBar \(AppInfo.versionString)")
+                            .font(.system(size: 13, weight: .semibold))
+                            .textSelection(.enabled)
+                        Link(AppInfo.repositoryURL.absoluteString, destination: AppInfo.repositoryURL)
+                            .font(.system(size: 12))
+                    }
+                    Spacer()
+                }
+                .padding(8)
+            }
+
             HStack {
                 Text("Only providers with active numbers appear in the unified menu bar strip.")
                     .font(.system(size: 11))
@@ -161,6 +180,23 @@ private struct SettingsRootView: View {
             }
         }
         .padding(18)
-        .frame(width: 480)
+        .frame(width: 528)
+    }
+}
+
+/// App identity shown in Settings → About.
+enum AppInfo {
+    static let repositoryURL = URL(string: "https://github.com/lubino/aiBar")!
+
+    /// `CFBundleShortVersionString` from the bundle, e.g. "0.1.5"; "dev" when run via `swift run`.
+    static var versionString: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String
+        let build = info?["CFBundleVersion"] as? String
+        guard let short, !short.isEmpty else { return "(dev build)" }
+        if let build, !build.isEmpty, build != short {
+            return "\(short) (\(build))"
+        }
+        return short
     }
 }

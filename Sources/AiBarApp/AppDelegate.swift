@@ -40,7 +40,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
-        let appMenu = NSMenu()
+        let appMenu = NSMenu(title: "aiBar")
+        appMenu.addItem(withTitle: "About aiBar", action: #selector(showAboutPanel), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Settings…", action: #selector(openSettingsShortcut), keyEquivalent: ",")
         appMenu.addItem(withTitle: "Refresh All", action: #selector(refreshAllShortcut), keyEquivalent: "r")
         appMenu.addItem(NSMenuItem.separator())
@@ -67,6 +69,35 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(editMenuItem)
 
         NSApp.mainMenu = mainMenu
+    }
+
+    /// Standard macOS About panel with the bundle version and a clickable link to the Git repository.
+    @objc private func showAboutPanel() {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let credits = NSMutableAttributedString(
+            string: "AI subscription usage limits in your menu bar.\n",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: paragraph,
+            ]
+        )
+        credits.append(NSAttributedString(
+            string: AppInfo.repositoryURL.absoluteString,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .link: AppInfo.repositoryURL,
+                .paragraphStyle: paragraph,
+            ]
+        ))
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "aiBar",
+            .applicationVersion: AppInfo.versionString,
+            .version: "",
+            .credits: credits,
+        ])
     }
 
     @objc private func openSettingsShortcut() {

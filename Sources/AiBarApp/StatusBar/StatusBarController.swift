@@ -13,6 +13,10 @@ public final class StatusBarController: NSObject {
     private var cancellables = Set<AnyCancellable>()
     private var globalClickMonitor: Any?
     private var appearanceObservation: NSKeyValueObservation?
+    /// Signature of what the strip currently shows; redraws are skipped when it is unchanged.
+    /// Setting `btn.image` / `statusItem.length` re-fires `effectiveAppearance` KVO, so without this
+    /// guard the observer and the redraw fed each other in a tight loop (~100% CPU).
+    private var lastRenderSignature: String?
 
     public init(store: UsageStore, onOpenSettings: @escaping () -> Void) {
         self.store = store
@@ -30,6 +34,7 @@ public final class StatusBarController: NSObject {
 
             appearanceObservation = btn.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
                 Task { @MainActor in
+                    // Only dark/light flips matter; updateMenubarStrip() no-ops when nothing changed.
                     self?.updateMenubarStrip()
                 }
             }
@@ -97,6 +102,13 @@ public final class StatusBarController: NSObject {
             tooltipLines.append("\(provider.displayName): \(joined)")
         }
 
+        let isDarkAppearance = btn.effectiveAppearance.bestMatch(from: [.darkAqua, .vibrantDark, .aqua]) != .aqua
+        let signature = "\(isDarkAppearance)|" + activeEntries.map { entry in
+            "\(entry.provider.rawValue):" + entry.numbers.map { "\($0.value)/\($0.severity)" }.joined(separator: ",")
+        }.joined(separator: ";")
+        guard signature != lastRenderSignature else { return }
+        lastRenderSignature = signature
+
         if activeEntries.isEmpty {
             let icon = ProviderIcons.appFallbackIcon(size: 13)
             btn.image = icon
@@ -105,7 +117,6 @@ public final class StatusBarController: NSObject {
             return
         }
 
-        let isDarkAppearance = btn.effectiveAppearance.bestMatch(from: [.darkAqua, .vibrantDark, .aqua]) != .aqua
         let strip = Self.renderCompactStripImage(entries: activeEntries, isDark: isDarkAppearance)
         btn.image = strip
         // Tight fixed length eliminates macOS's wide default NSStatusBarButton horizontal padding
