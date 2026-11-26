@@ -202,11 +202,30 @@ private func runGrokTests() throws {
     check(QuotaSeverity.forUsedPercent(93) == .critical, "93% used is critical")
 }
 
+@MainActor
+private func runWebSessionHTTPTests() {
+    func cookie(_ domain: String) -> HTTPCookie {
+        HTTPCookie(properties: [.domain: domain, .path: "/", .name: "n", .value: "v"])!
+    }
+    check(WebCookieHTTPClient.cookie(cookie(".claude.ai"), matchesAnyOf: ["claude.ai"]), "dot-prefixed cookie domain matches")
+    check(WebCookieHTTPClient.cookie(cookie("gemini.google.com"), matchesAnyOf: ["google.com"]), "subdomain cookie matches")
+    check(!WebCookieHTTPClient.cookie(cookie("notclaude.ai"), matchesAnyOf: ["claude.ai"]), "suffix without dot does not match")
+
+    let url = URL(string: "https://claude.ai/api/organizations")!
+    let cf = HTTPURLResponse(url: url, statusCode: 403, httpVersion: nil, headerFields: [:])!
+    check(WebCookieHTTPClient.isCloudflareChallenge(cf, data: Data("<title>Just a moment...</title>".utf8)), "CF interstitial detected")
+    let mitigated = HTTPURLResponse(url: url, statusCode: 403, httpVersion: nil, headerFields: ["cf-mitigated": "challenge"])!
+    check(WebCookieHTTPClient.isCloudflareChallenge(mitigated, data: Data()), "cf-mitigated header detected")
+    let plain403 = HTTPURLResponse(url: url, statusCode: 403, httpVersion: nil, headerFields: [:])!
+    check(!WebCookieHTTPClient.isCloudflareChallenge(plain403, data: Data(#"{"error":"forbidden"}"#.utf8)), "plain JSON 403 is not a challenge")
+}
+
 do {
     try runAnthropicTests()
     try runOpenAITests()
     try runGoogleTests()
     try runGrokTests()
+    runWebSessionHTTPTests()
     print("AiBarTests: \(passedCount) assertions passed, \(failedCount) failed.")
     exit(failedCount == 0 ? 0 : 1)
 } catch {

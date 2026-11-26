@@ -21,6 +21,8 @@ public final class UsageStore: ObservableObject {
     @Published public var maxPopoverHeight: CGFloat = 820
 
     private var timer: Timer?
+    private var grokCLIRetryAfter: Date?
+    private static let grokCLIBackoff: TimeInterval = 60 * 60
 
     private init() {
         let loadedConfig = AppConfig.load()
@@ -271,7 +273,7 @@ public final class UsageStore: ObservableObject {
             if hasWeb {
                 var snap = try await WebSessionManager.shared.fetchWebQuota(for: .google)
                 // Best-effort Gemini API billing (AI Studio) using the same Google web session.
-                if let billing = await WebSessionManager.shared.fetchAIStudioBilling() {
+                if let billing = await WebSessionManager.shared.cachedAIStudioBilling() {
                     GoogleProvider.applyAIStudioBilling(billing, to: &snap)
                 }
                 return snap
@@ -287,17 +289,9 @@ public final class UsageStore: ObservableObject {
                 )
             }
 
-            // 2. Local ~/.grok/auth.json + grok CLI stdio
+            // 2. Local ~/.grok/auth.json via the CLI proxy (one cheap HTTPS request)
             let localAuth = LocalCredentialReader.readGrokOAuth()
-            if let grokBin = LocalCredentialReader.findGrokExecutable() {
-                if let snap = try? await GrokProvider.fetchViaGrokCLIStdio(
-                    executablePath: grokBin,
-                    fallbackEmail: localAuth?.email,
-                    fallbackPlan: localAuth?.planHint
-                ) {
-                    return snap
-                }
-            }
+            var proxyError: Error?
             if let localAuth, !localAuth.isExpired() {
                 do {
                     return try await GrokProvider.fetchViaCLIProxy(
@@ -307,11 +301,30 @@ public final class UsageStore: ObservableObject {
                         source: .localOAuth
                     )
                 } catch {
-                    if !hasWeb { throw error }
+                    proxyError = error
                 }
             }
 
-            // 3. WebKit session
+            // 3. `grok agent stdio` (launches the ~190 MB CLI, which can also refresh its own token).
+            // Backed off after a failure so a broken CLI is not relaunched on every refresh.
+            if let grokBin = LocalCredentialReader.findGrokExecutable(),
+               grokCLIRetryAfter.map({ Date() >= $0 }) ?? true {
+                do {
+                    let snap = try await GrokProvider.fetchViaGrokCLIStdio(
+                        executablePath: grokBin,
+                        fallbackEmail: localAuth?.email,
+                        fallbackPlan: localAuth?.planHint
+                    )
+                    grokCLIRetryAfter = nil
+                    return snap
+                } catch {
+                    grokCLIRetryAfter = Date().addingTimeInterval(Self.grokCLIBackoff)
+                    if proxyError == nil { proxyError = error }
+                }
+            }
+            if let proxyError, !hasWeb { throw proxyError }
+
+            // 4. WebKit session
             if hasWeb {
                 return try await WebSessionManager.shared.fetchWebQuota(for: .grok)
             }
@@ -356,5 +369,7 @@ public final class UsageStore: ObservableObject {
                 await self?.refreshAll()
             }
         }
+        // Let macOS coalesce wakeups with other timers.
+        timer?.tolerance = intervalSeconds * 0.1
     }
 }

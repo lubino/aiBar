@@ -6,7 +6,18 @@ import AiBarCore
 public final class WebSessionManager: NSObject {
     public static let shared = WebSessionManager()
 
-    public static let safariUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
+    public static let safariUserAgent = WebCookieHTTPClient.safariUserAgent
+
+    /// Minimum gap between `WKWebView` fallbacks for one provider after plain-HTTP failures.
+    static let webViewFallbackCooldown: TimeInterval = 30 * 60
+    /// A full page load every so often lets the site's own JavaScript rotate session cookies
+    /// (e.g. Google `__Secure-*PSIDTS`) that plain HTTP requests never refresh.
+    static let webViewMaintenanceInterval: TimeInterval = 12 * 60 * 60
+    /// AI Studio billing changes slowly and still needs a full SPA load, so it is fetched at most hourly.
+    static let aiStudioBillingInterval: TimeInterval = 60 * 60
+
+    private var lastWebViewLoad: [ProviderID: Date] = [:]
+    private var aiStudioCache: (fetchedAt: Date, data: Data?)?
 
     /// Script injected at document start on grok.com to passively capture signed WKE billing responses
     public static let grokInterceptorSource = """
@@ -91,6 +102,16 @@ public final class WebSessionManager: NSObject {
     });
     """
 
+    /// AI Studio billing, cached for `aiStudioBillingInterval` (including "no billing account" results).
+    public func cachedAIStudioBilling() async -> Data? {
+        if let cache = aiStudioCache, Date().timeIntervalSince(cache.fetchedAt) < Self.aiStudioBillingInterval {
+            return cache.data
+        }
+        let data = await fetchAIStudioBilling()
+        aiStudioCache = (Date(), data)
+        return data
+    }
+
     /// Best-effort Gemini API billing probe on `aistudio.google.com/billing` (same Google session cookies).
     /// Returns nil when the user has no AI Studio billing account or the page did not load in time.
     public func fetchAIStudioBilling(timeout: TimeInterval = 20) async -> Data? {
@@ -139,8 +160,69 @@ public final class WebSessionManager: NSObject {
         return data
     }
 
-    /// Runs an off-screen WKWebView refresh using the persistent WebsiteDataStore.
+    /// Refreshes quota for a web-signed-in provider.
+    ///
+    /// Normally this is plain HTTP with cookies exported from the persistent WebKit store (no WebContent
+    /// process, no page JavaScript). A hidden `WKWebView` is used only when the HTTP path fails
+    /// (Cloudflare challenge, expired cookies, endpoint change) at most once per
+    /// `webViewFallbackCooldown`, and every `webViewMaintenanceInterval` so the site can rotate cookies.
     public func fetchWebQuota(for provider: ProviderID) async throws -> ProviderSnapshot {
+        let now = Date()
+        let lastLoad = lastWebViewLoad[provider]
+        if let lastLoad, now.timeIntervalSince(lastLoad) >= Self.webViewMaintenanceInterval {
+            return try await fetchWebQuotaUsingWebView(for: provider)
+        }
+        if lastLoad == nil {
+            // Treat app launch as a fresh baseline so maintenance loads start 12h later.
+            lastWebViewLoad[provider] = now.addingTimeInterval(-Self.webViewFallbackCooldown)
+        }
+
+        do {
+            return try await fetchWebQuotaOverHTTP(for: provider)
+        } catch let error as URLError {
+            // Offline / DNS / timeout: a web view would fail the same way.
+            throw ProviderFetchError.networkError(error.localizedDescription)
+        } catch {
+            if let last = lastWebViewLoad[provider], Date().timeIntervalSince(last) < Self.webViewFallbackCooldown {
+                throw error
+            }
+            NSLog("aiBar: %@ HTTP refresh failed (%@); falling back to WKWebView", provider.rawValue, error.localizedDescription)
+            return try await fetchWebQuotaUsingWebView(for: provider)
+        }
+    }
+
+    /// Plain `URLSession` refresh using the WebKit session cookies; rotated cookies are written back.
+    public func fetchWebQuotaOverHTTP(for provider: ProviderID) async throws -> ProviderSnapshot {
+        let store = WKWebsiteDataStore.default().httpCookieStore
+        let domains = WebSessionHTTPFetcher.cookieDomains(for: provider)
+        let original = await store.allCookies().filter { WebCookieHTTPClient.cookie($0, matchesAnyOf: domains) }
+        guard !original.isEmpty else {
+            throw ProviderFetchError.unauthorized("Not signed in to \(provider.displayName)")
+        }
+        let client = WebCookieHTTPClient(cookies: original, userAgent: Self.safariUserAgent)
+        defer {
+            let updated = client.cookies
+            Task { @MainActor in await Self.syncCookies(original: original, updated: updated, into: store) }
+        }
+        return try await WebSessionHTTPFetcher.fetch(provider, using: client)
+    }
+
+    /// Writes cookies added/changed by HTTP responses back to WebKit and drops ones the server expired.
+    private static func syncCookies(original: [HTTPCookie], updated: [HTTPCookie], into store: WKHTTPCookieStore) async {
+        func key(_ c: HTTPCookie) -> String { "\(c.name)|\(c.domain)|\(c.path)" }
+        let before = Dictionary(original.map { (key($0), $0) }, uniquingKeysWith: { a, _ in a })
+        let after = Dictionary(updated.map { (key($0), $0) }, uniquingKeysWith: { a, _ in a })
+        for (k, cookie) in after where before[k]?.value != cookie.value || before[k]?.expiresDate != cookie.expiresDate {
+            await store.setCookie(cookie)
+        }
+        for (k, cookie) in before where after[k] == nil {
+            await store.deleteCookie(cookie)
+        }
+    }
+
+    /// Runs an off-screen WKWebView refresh using the persistent WebsiteDataStore.
+    public func fetchWebQuotaUsingWebView(for provider: ProviderID) async throws -> ProviderSnapshot {
+        lastWebViewLoad[provider] = Date()
         let cfg = makeWebViewConfiguration(for: provider)
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 960, height: 700), configuration: cfg)
         webView.customUserAgent = Self.safariUserAgent
@@ -197,6 +279,8 @@ public final class WebSessionManager: NSObject {
     }
 
     public func clearWebSession(for provider: ProviderID) async {
+        lastWebViewLoad[provider] = nil
+        if provider == .google { aiStudioCache = nil }
         let domainKeywords: [String]
         switch provider {
         case .google:

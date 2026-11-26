@@ -36,6 +36,8 @@ aiBar/
 │   │   │   └── AppConfig.swift        # ~/.config/aibar/config.json + ~/.config/aibar/snapshots.json
 │   │   ├── Storage/
 │   │   │   └── KeychainStore.swift    # macOS Login Keychain wrapper (service: "sk.lubino.aiBar")
+│   │   ├── Web/
+│   │   │   └── WebSessionHTTP.swift   # Cookie-seeded URLSession client + HTTP replays of the web-session quota requests
 │   │   ├── Auth/
 │   │   │   └── LocalCredentialReader.swift # Reads ~/.grok/auth.json, ~/.claude/.credentials.json, ~/.codex/auth.json, ~/.local/share/opencode/auth.json
 │   │   └── Providers/
@@ -84,7 +86,13 @@ aiBar/
 
 ## 4. Provider Auth & Wire Schemas
 
-All 4 providers use undocumented web/CLI quota endpoints. Execute web-authenticated requests **inside** same-origin `WKWebView` (`WebSessionManager.swift`) rather than copying cookies into `URLSession`, because `claude.ai` and `chatgpt.com` enforce Cloudflare Turnstile (`cf_clearance`) and `grok.com` requires a browser-held Web Key Exchange (WKE) keypair in IndexedDB.
+All 4 providers use undocumented web/CLI quota endpoints.
+
+**Web sessions are refreshed over plain HTTP, not in a `WKWebView`** (energy: a hidden web view boots a WebContent process and the provider's whole SPA on every refresh, which macOS flagged as significant battery use).
+- `WKWebView` is used for **sign-in only** (`WebLoginWindowController`). Cookies persist in `WKWebsiteDataStore.default()`.
+- On refresh, `WebSessionManager.fetchWebQuota` exports that provider's cookies (`WebSessionHTTPFetcher.cookieDomains`) into an ephemeral `URLSession` (`WebCookieHTTPClient`, `AiBarCore/Web/WebSessionHTTP.swift`) with the same Safari UA, replays the same-origin requests the old JS probes made, packs them into the existing web-bundle JSON and reuses `parseWebBundleJSON` / `parseUsageHTML`. Rotated `Set-Cookie` values are written back to WebKit.
+- `URLSession` shares CFNetwork with WebKit, so Cloudflare (`cf_clearance` on `claude.ai` / `chatgpt.com`) normally accepts it. On a challenge, 401 or other HTTP-path failure (not offline `URLError`s), it falls back to the old off-screen `WKWebView` probe (`fetchWebQuotaUsingWebView`) at most once per 30 min per provider, plus a maintenance web view load every 12 h so page JavaScript can rotate cookies (e.g. Google `__Secure-*PSIDTS`). `grok.com` may require its browser-held WKE keypair, in which case the web view fallback handles it.
+- AI Studio billing still needs the SPA (`MakerSuiteService` RPCs + DOM text) and is cached for 1 h (`cachedAIStudioBilling`).
 
 ### Google (`GoogleProvider.swift` + `WebSessionManager.swift`)
 - **Web Sign-In:** `https://gemini.google.com/usage`. Requires macOS Safari `customUserAgent` (otherwise `accounts.google.com` blocks with `403 disallowed_useragent`) and `WKUIDelegate.webView(_:createWebViewWith:...)` for SSO popups.
@@ -104,7 +112,7 @@ All 4 providers use undocumented web/CLI quota endpoints. Execute web-authentica
 - **Window classification:** Always inspect `limit_window_seconds` (`<= 21600` = 5-hour `shortWindow`; `> 21600` = 7-day/30-day `longWindow`). Do **not** assume `primary_window` is 5-hour—ChatGPT Team plans return the 7-day (`604800`s) window in `primary_window` with `secondary_window: null`.
 
 ### Grok (`GrokProvider.swift`)
-- **Priority:** Manual Keychain → `grok agent stdio` JSON-RPC (`initialize` + `_x.ai/billing`, 6s hard deadline) → `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` (`x-xai-token-auth: xai-grok-cli` + Bearer from `~/.grok/auth.json`) → WebKit on `https://grok.com/?_s=billing` (`WKUserScript` network hook + gRPC-Web `GetGrokCreditsConfig` protobuf reader).
+- **Priority:** Manual Keychain → `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` (`x-xai-token-auth: xai-grok-cli` + Bearer from `~/.grok/auth.json`, when not expired) → `grok agent stdio` JSON-RPC (`initialize` + `_x.ai/billing`, 6s hard deadline enforced by terminating the process; skipped for 1 h after a failure because it launches a ~190 MB binary) → web session (HTTP gRPC-Web `GetGrokCreditsConfig`, falling back to WebKit on `https://grok.com/?_s=billing` with the `WKUserScript` network hook).
 - **Metric selection:** Grok has a single periodic credit pool (no 5-hour window). When `config.productUsage` includes `"GrokBuild"`, **prioritize `GrokBuild.usagePercent`** as `longWindow` (`Grok Build (7-Day)`) and place total pool usage in `extraWindows` if it differs.
 
 ---

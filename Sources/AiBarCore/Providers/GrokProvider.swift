@@ -92,6 +92,12 @@ public enum GrokProvider {
                 let deadline = Date().addingTimeInterval(6.0)
                 var buffer = Data()
 
+                // `availableData` blocks while the CLI is alive but silent; terminating the process at the
+                // deadline closes stdout so the read loop below always returns.
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 6.5) {
+                    if proc.isRunning { proc.terminate() }
+                }
+
                 while Date() < deadline {
                     let available = stdoutPipe.fileHandleForReading.availableData
                     if available.isEmpty {
